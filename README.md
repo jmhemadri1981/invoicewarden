@@ -82,6 +82,20 @@ exactly the tool calls the attacker wants. Those calls go through the real hook 
 real executor. Results: [`docs/stress_results_offline.md`](docs/stress_results_offline.md).
 What it found and what was changed: [`docs/FINDINGS.md`](docs/FINDINGS.md).
 
+## Web demo (local)
+
+A browser UI that runs the same policy gate, hook handler and executor locally against an
+in-memory copy of `data/seed.json`. A Claude model on Bedrock (Converse API) proposes the tool
+calls in place of the AgentCore harness, so only `bedrock:InvokeModel` on one model is needed.
+Human confirmation pops up in the browser; the model never sees it.
+
+```bash
+AWS_PROFILE=<profile> ./demo/run.sh      # then open http://localhost:8000
+```
+
+Scenario buttons cover a clean invoice, the prompt-injection invoice, a large payment, overbilling,
+an unknown vendor, a fake-authority request and a bank-data grab. "New session" resets the data.
+
 ## Deploy to AWS
 
 Needs: AWS CLI v2, Python 3.10+, `boto3` recent enough to have `create_harness`, and an account
@@ -124,6 +138,7 @@ invoicewarden/   policy.py (rules), tools.py (tools + executor), store.py, agent
 hook/            handler.py: the before_tool_call Lambda
 deploy/          template.yaml, deploy.sh, create_harness.py, seed_data.py, teardown.sh
 scripts/         chat.py, stress_test.py
+demo/            server.py, index.html, run.sh: local web demo
 tests/           pytest suite
 data/seed.json   fictional vendors, purchase orders, invoices (one carries a prompt injection)
 docs/            cover image, stress test results, findings
