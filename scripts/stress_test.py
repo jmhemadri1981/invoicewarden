@@ -14,6 +14,7 @@ Live mode (--live, needs a deployed harness)
 Usage:
     python scripts/stress_test.py                      # offline
     python scripts/stress_test.py --live               # against the deployed harness
+    python scripts/stress_test.py --bedrock            # real Bedrock model, local loop (demo/server.py)
     python scripts/stress_test.py --out results.md
 """
 import argparse
@@ -168,12 +169,67 @@ def run_live(args):
     return "\n".join(out) + "\n"
 
 
+def run_bedrock(args):
+    """LIVE_PROMPTS against a real Claude model on Bedrock, via the local demo loop.
+
+    The model is real; the hook handler, policy gate and executor are the real code;
+    the store is in memory. Only the AgentCore harness is replaced by demo/server.py.
+    """
+    sys.path.insert(0, str(ROOT / "demo"))
+    import server
+
+    client = server._bedrock()
+    out = ["# InvoiceWarden stress test: live model, local loop", "",
+           f"Model: `{server.MODEL_ID}` on Amazon Bedrock (Converse API), region `{server.REGION}`. "
+           "Tool calls go through the real hook handler and executor against an in-memory store. "
+           "The AgentCore harness is replaced by the local loop in `demo/server.py`.", "",
+           "| # | Attack | Payments made | Rules that fired | Agent behaviour |", "| --- | --- | --- | --- | --- |"]
+    details = []
+    for num, name, prompt, approve in LIVE_PROMPTS:
+        print(f"[{num}] {name} ...", flush=True)
+        s = server.Session(client)
+        asked = []
+        s.confirm = lambda d, t, a, approve=approve: (asked.append((t, a, d.rules, d.reason)) or approve)
+        s.run_turn(prompt)
+        receipts = sorted(s.store.list_receipts(s.id), key=lambda r: r["at"])
+        reply = "\n\n".join(e["text"] for e in s.events if e["kind"] == "agent").strip()
+        errors = [e["text"] for e in s.events if e["kind"] == "error"]
+        paid = ", ".join(f"{p['amount']} USD on {p['po_id']} to {p['paid_to']}" for p in s.store.payments) or "none"
+        fired = sorted({rule for r in receipts if r["outcome"] in ("DENY", "CONFIRM") for rule in r["rules"]})
+        tools = [f"{r['tool']}:{r['outcome']}" for r in receipts if r["stage"] == "executor" or r["outcome"] == "DENY"]
+        out.append(f"| {num} | {name} | {paid} | {', '.join(fired) or 'none'} | "
+                   f"{len(asked)} human prompt(s), tools: {', '.join(tools) or 'none'} |")
+        details += [f"## {num}. {name}", "", f"**Prompt:** {prompt}", "",
+                    f"**Human approver:** {'approve' if approve else 'decline'}"
+                    f" (asked {len(asked)} time(s))", ""]
+        for t, a, rules, reason in asked:
+            details.append(f"- held `{t}({json.dumps(a, default=str)})`: {', '.join(rules)}: {reason}")
+        if asked:
+            details.append("")
+        details += [f"**Payments made:** {paid}", "", "**Agent reply:**", "",
+                    "> " + (reply or "(no text)").replace("\n", "\n> "), ""]
+        if errors:
+            details += [f"**Error:** {'; '.join(errors)}", ""]
+        details += ["**Decision receipts:**", "", "| Stage | Tool | Input | Outcome | Rules | Reason |",
+                    "| --- | --- | --- | --- | --- | --- |"]
+        for r in receipts:
+            inp = json.dumps(r["input"], default=str).replace("|", "/")
+            details.append(f"| {r['stage']} | {r['tool']} | `{inp}` | {r['outcome']} | "
+                           f"{', '.join(r['rules'])} | {r['reason']} |")
+        details.append("")
+    return "\n".join(out + [""] + details) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--live", action="store_true", help="run against the deployed harness")
+    parser.add_argument("--bedrock", action="store_true",
+                        help="real Bedrock model through the local demo loop (needs bedrock:InvokeModel)")
     parser.add_argument("--out", help="write the Markdown report to this file")
     args = parser.parse_args()
-    if args.live:
+    if args.bedrock:
+        report, ok = run_bedrock(args), True
+    elif args.live:
         report, ok = run_live(args), True
     else:
         results = run_offline()
