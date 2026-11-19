@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: InvoiceWarden - tables, policy-gate hook Lambda, and IAM roles for the AgentCore harness.
+
+Resources:
+  # Vendors, purchase orders, invoices. No runtime principal below can write here (Rule 6).
+  ReferenceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-reference"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  # Session taint flags, payments, decision receipts.
+  LedgerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-ledger"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  HookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-hook-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: policy-gate-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadReference
+                Effect: Allow
+                Action: [dynamodb:GetItem]
+                Resource: !GetAtt ReferenceTable.Arn
+              - Sid: ReadWriteLedger
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:PutItem]
+                Resource: !GetAtt LedgerTable.Arn
+              - Sid: NeverWriteReference
+                Effect: Deny
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:BatchWriteItem]
+                Resource: !GetAtt ReferenceTable.Arn
+
+  HookFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-policy-gate"
+      Description: before_tool_call hook. Denies tool calls that break the InvoiceWarden rules.
+      Runtime: python3.12
+      Handler: hook.handler.lambda_handler
+      Role: !GetAtt HookRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          REFERENCE_TABLE: !Ref ReferenceTable
+          LEDGER_TABLE: !Ref LedgerTable
+      Code:
+        # Placeholder that denies everything. deploy.sh uploads the real code right after.
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"decision": "deny", "reason": "Policy gate code not deployed yet."}
+
+  HarnessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-harness-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock-agentcore.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: harness-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockModelInvocation
+                Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:*"
+              - Sid: BedrockGuardrail
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*"
+              - Sid: InvokePolicyGateHook
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt HookFunction.Arn
+              - Sid: EcrPublicTokenAccess
+                Effect: Allow
+                Action: [ecr-public:GetAuthorizationToken, sts:GetServiceBearerToken]
+                Resource: "*"
+              - Sid: XRayTracingAccess
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords, xray:GetSamplingRules, xray:GetSamplingTargets]
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:DescribeLogStreams, logs:CreateLogStream, logs:PutLogEvents]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+              - Sid: CloudWatchLogsDescribeGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Sid: CloudWatchLogsPutResourcePolicy
+                Effect: Allow
+                Action: logs:PutResourcePolicy
+                Resource: "*"
+              - Sid: CloudWatchMetricsPublish
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals: { "cloudwatch:namespace": bedrock-agentcore }
+              - Sid: AgentCoreWorkloadIdentity
+                Effect: Allow
+                Action: [bedrock-agentcore:GetWorkloadAccessToken, bedrock-agentcore:GetWorkloadAccessTokenForJWT]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/harness_*"
+              - Sid: AgentCoreMemory
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:DeleteEvent
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:RetrieveMemoryRecords
+                Resource: !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/harness_*"
+
+  # Attach this to the person or service that runs scripts/chat.py. Note: no write on the reference table.
+  OperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-operator"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeHarness
+            Effect: Allow
+            Action: [bedrock-agentcore:InvokeHarness, bedrock-agentcore:InvokeAgentRuntime]
+            Resource: !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:harness/*"
+          - Sid: ReadReference
+            Effect: Allow
+            Action: [dynamodb:GetItem]
+            Resource: !GetAtt ReferenceTable.Arn
+          - Sid: ReadWriteLedger
+            Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:PutItem]
+            Resource: !GetAtt LedgerTable.Arn
+
+Outputs:
+  ReferenceTable: { Value: !Ref ReferenceTable }
+  LedgerTable: { Value: !Ref LedgerTable }
+  HookFunctionArn: { Value: !GetAtt HookFunction.Arn }
+  HookFunctionName: { Value: !Ref HookFunction }
+  HarnessRoleArn: { Value: !GetAtt HarnessRole.Arn }
+  OperatorPolicyArn: { Value: !Ref OperatorPolicy }
