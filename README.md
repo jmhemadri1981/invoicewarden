@@ -132,3 +132,7 @@ docs/            cover image, stress test results, findings
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Author
+
+Built by [jmhemadri1981](https://github.com/jmhemadri1981).
